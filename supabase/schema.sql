@@ -271,3 +271,170 @@ create trigger agencies_updated_at
 create trigger clients_updated_at
   before update on clients
   for each row execute function update_updated_at();
+-- ============================================
+-- AUTH & SECURITY TABLES
+-- ============================================
+
+-- Admin users (completely separate from agencies)
+CREATE TABLE IF NOT EXISTS admin_users (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  email text UNIQUE NOT NULL,
+  password_hash text NOT NULL, -- bcrypt hash
+  last_login_at timestamptz,
+  created_at timestamptz DEFAULT now()
+);
+
+-- Admin 2FA (TOTP)
+CREATE TABLE IF NOT EXISTS admin_2fa (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  admin_id uuid REFERENCES admin_users(id) ON DELETE CASCADE,
+  secret text NOT NULL,
+  enabled boolean DEFAULT false,
+  backup_codes text[] DEFAULT '{}',
+  created_at timestamptz DEFAULT now()
+);
+
+-- Admin sessions (revocable)
+CREATE TABLE IF NOT EXISTS admin_sessions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  admin_id uuid REFERENCES admin_users(id) ON DELETE CASCADE,
+  token text UNIQUE NOT NULL,
+  ip_address text,
+  user_agent text,
+  expires_at timestamptz NOT NULL,
+  revoked_at timestamptz,
+  created_at timestamptz DEFAULT now()
+);
+
+-- IP whitelist (dynamic, admin-managed)
+CREATE TABLE IF NOT EXISTS ip_whitelist (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  ip_address text UNIQUE NOT NULL,
+  label text,
+  enabled boolean DEFAULT true,
+  created_by uuid REFERENCES admin_users(id),
+  last_used_at timestamptz,
+  created_at timestamptz DEFAULT now()
+);
+
+-- Login attempts (brute force detection)
+CREATE TABLE IF NOT EXISTS login_attempts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  email text,
+  ip_address text NOT NULL,
+  user_agent text,
+  path text,
+  success boolean DEFAULT false,
+  failure_reason text,
+  created_at timestamptz DEFAULT now()
+);
+
+-- Security alerts
+CREATE TABLE IF NOT EXISTS security_alerts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  alert_type text NOT NULL, -- 'brute_force', 'ip_blocked', 'new_ip_login'
+  severity text NOT NULL,   -- 'low', 'medium', 'high', 'critical'
+  ip_address text,
+  email text,
+  details jsonb,
+  acknowledged_at timestamptz,
+  created_at timestamptz DEFAULT now()
+);
+
+-- Admin audit log
+CREATE TABLE IF NOT EXISTS admin_audit_log (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  admin_id uuid REFERENCES admin_users(id),
+  action text NOT NULL,
+  target_type text,
+  target_id text,
+  details jsonb,
+  ip_address text,
+  created_at timestamptz DEFAULT now()
+);
+
+-- ============================================
+-- SUBSCRIPTION & PAYMENT TABLES
+-- ============================================
+
+-- Subscription plans
+CREATE TABLE IF NOT EXISTS subscription_plans (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name text NOT NULL,           -- 'starter', 'growth', 'agency_pro'
+  display_name text NOT NULL,
+  price_cents integer NOT NULL,
+  max_clients integer,          -- null = unlimited
+  features jsonb DEFAULT '{}',
+  wise_product_id text,
+  created_at timestamptz DEFAULT now()
+);
+
+-- Seed the plans
+INSERT INTO subscription_plans (name, display_name, price_cents, max_clients, features) VALUES
+  ('starter',    'Starter',    4900,  5,    '{"ai_scripts": false, "upsell_signals": false, "history_days": 7,  "white_label": false}'),
+  ('growth',     'Growth',     7900,  20,   '{"ai_scripts": true,  "upsell_signals": true,  "history_days": 14, "white_label": false}'),
+  ('agency_pro', 'Agency Pro', 14900, null, '{"ai_scripts": true,  "upsell_signals": true,  "history_days": 30, "white_label": true}')
+ON CONFLICT DO NOTHING;
+
+-- Add subscription fields to agencies
+ALTER TABLE agencies ADD COLUMN IF NOT EXISTS plan_id uuid REFERENCES subscription_plans(id);
+ALTER TABLE agencies ADD COLUMN IF NOT EXISTS plan_name text DEFAULT 'trial';
+ALTER TABLE agencies ADD COLUMN IF NOT EXISTS subscription_started_at timestamptz;
+ALTER TABLE agencies ADD COLUMN IF NOT EXISTS subscription_ends_at timestamptz;
+ALTER TABLE agencies ADD COLUMN IF NOT EXISTS wise_payment_reference text;
+ALTER TABLE agencies ADD COLUMN IF NOT EXISTS auth_user_id uuid UNIQUE;
+ALTER TABLE agencies ADD COLUMN IF NOT EXISTS is_banned boolean DEFAULT false;
+ALTER TABLE agencies ADD COLUMN IF NOT EXISTS ban_reason text;
+
+-- Payment records
+CREATE TABLE IF NOT EXISTS payments (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  agency_id uuid REFERENCES agencies(id) ON DELETE CASCADE,
+  plan_id uuid REFERENCES subscription_plans(id),
+  amount_cents integer NOT NULL,
+  currency text DEFAULT 'USD',
+  wise_transfer_id text,
+  wise_reference text,
+  status text DEFAULT 'pending' CHECK (status IN ('pending', 'confirmed', 'failed', 'refunded')),
+  confirmed_by_admin uuid REFERENCES admin_users(id),
+  confirmed_at timestamptz,
+  period_start timestamptz,
+  period_end timestamptz,
+  notes text,
+  created_at timestamptz DEFAULT now()
+);
+
+-- ============================================
+-- RLS — Agency data isolation
+-- ============================================
+
+ALTER TABLE payments ENABLE ROW LEVEL SECURITY;
+
+-- Agencies see only their own payments
+CREATE POLICY "agencies_own_payments" ON payments
+  FOR SELECT USING (
+    agency_id IN (
+      SELECT id FROM agencies WHERE auth_user_id = auth.uid()
+    )
+  );
+
+-- ============================================
+-- INDEXES
+-- ============================================
+
+CREATE INDEX IF NOT EXISTS idx_login_attempts_ip    ON login_attempts(ip_address, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_security_alerts_unack ON security_alerts(acknowledged_at) WHERE acknowledged_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_admin_sessions_token ON admin_sessions(token);
+CREATE INDEX IF NOT EXISTS idx_admin_sessions_active ON admin_sessions(admin_id) WHERE revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_agencies_auth_user   ON agencies(auth_user_id);
+CREATE INDEX IF NOT EXISTS idx_payments_agency      ON payments(agency_id, created_at DESC);
+
+-- ============================================
+-- Insert your admin account (run once after setup)
+-- Generate hash: node -e "const b=require('bcryptjs');console.log(b.hashSync('YourPassword123!',12))"
+-- ============================================
+
+-- INSERT INTO admin_users (email, password_hash) VALUES ('your@email.com', '$2b$12$...');
+
+-- Insert your home IP
+-- INSERT INTO ip_whitelist (ip_address, label) VALUES ('YOUR.IP.HERE', 'Home');
