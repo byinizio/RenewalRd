@@ -89,13 +89,26 @@ async function runDailyAnalysis() {
         continue;
       }
 
-      const clientAnalyses: ClientAnalysisResult[] = [];
-      let totalAtRisk = 0;
-      let totalRevenueAtRisk = 0;
+      // --- 2. NEW: Fetch Subscription Limits (Claude's addition) ---
+    const { data: planData } = await supabaseAdmin
+      .from('subscription_plans')
+      .select('max_clients, features')
+      .eq('id', agency.plan_id || '')
+      .single();
 
-      const activeClients = (agency.clients || []).filter(
-        (c: any) => c.status === 'active' || c.status === 'at_risk'
-      );
+    const maxClients = planData?.max_clients ?? 5; 
+    const hasAiScripts = planData?.features?.ai_scripts ?? false;
+    // We can use hasUpsell later in the email logic if needed
+    const hasUpsell = planData?.features?.upsell_signals ?? false;
+
+    const clientAnalyses: ClientAnalysisResult[] = [];
+    let totalAtRisk = 0;
+    let totalRevenueAtRisk = 0;
+
+    // --- 3. Filter & Slice Clients (Enforce the limit) ---
+    const activeClients = (agency.clients || [])
+      .filter((c: any) => c.status === 'active' || c.status === 'at_risk')
+      .slice(0, maxClients); // Only process what they pay for
 
       for (const client of activeClients) {
         try {
@@ -223,7 +236,7 @@ async function runDailyAnalysis() {
 
           // ── Generate AI analysis for at-risk clients (score >= 25) ──
           let analysis = null;
-          if (risk.score >= 25) {
+          if (risk.score >= 25 && hasAiScripts) {
             analysis = await generateClientAnalysis(client, aggregated, history, risk);
             totalAtRisk++;
             totalRevenueAtRisk += client.monthly_retainer_cents;
