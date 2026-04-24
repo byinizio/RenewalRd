@@ -1,0 +1,38 @@
+name: Daily Client Risk Analysis
+
+on:
+  schedule:
+    - cron: '0 8 * * *'   # 8am UTC daily (adjust per agency timezone in future)
+  workflow_dispatch:        # Manual trigger from GitHub Actions UI
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install node-fetch@2
+
+      - name: Run client risk analysis
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TWITTER_BEARER_TOKEN: ${{ secrets.TWITTER_BEARER_TOKEN }}
+          APP_URL: ${{ secrets.APP_URL }}
+        run: node scripts/process-clients.js
+
+      - name: Report status
+        if: always()
+        run: echo "Analysis complete at $(date -u)"

@@ -1,0 +1,7 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /dashboard
+Disallow: /digest/
+
+Sitemap: https://renewalradar.vercel.app/sitemap.xml
